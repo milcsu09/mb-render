@@ -13,7 +13,8 @@ mb_renderer_init (mb_renderer *r, mb_viewport *vp)
   r->window = SDL_CreateWindow ("Mandelbrot-Render", SDL_WINDOWPOS_CENTERED,
                                 SDL_WINDOWPOS_CENTERED, vp->w, vp->h,
                                 SDL_WINDOW_SHOWN);
-  r->renderer = SDL_CreateRenderer (r->window, -1, SDL_RENDERER_ACCELERATED);
+  r->renderer = SDL_CreateRenderer (r->window, -1,
+                                    SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
   r->texture = SDL_CreateTexture (r->renderer, SDL_PIXELFORMAT_RGB888,
                                   SDL_TEXTUREACCESS_STREAMING, vp->w, vp->h);
 
@@ -55,12 +56,10 @@ mb_renderer_main (mb_renderer *r)
           mb_viewport_to_plane (r->vp, r->zoom.mx, r->zoom.my, &mr, &mi);
           mb_viewport_zoom (r->vp, mr, mi, r->zoom.delta);
           r->zoom.value /= r->zoom.delta;
-          SDL_Delay (16);
         }
 
       if (r->recompute)
         {
-          // r->max_iter = fmax (75 * log2(1.0 / (r->vp->rmax - r->vp->rmin)), 50);
           const u32 s = SDL_GetTicks ();
           mb_renderer_recompute (r);
           const u32 e = SDL_GetTicks ();
@@ -68,7 +67,7 @@ mb_renderer_main (mb_renderer *r)
           printf ("(Recompute) %dms\n", e - s);
         }
 
-      SDL_SetRenderDrawColor (r->renderer, 0, 0, 0, 255);
+      SDL_SetRenderDrawColor (r->renderer, 32, 24, 24, 255);
       SDL_RenderClear (r->renderer);
 
       SDL_Rect vr = {
@@ -103,18 +102,16 @@ mb_renderer_poll (mb_renderer *r)
         else if (event.button.button == SDL_BUTTON_LEFT)
           {
             r->zooming = true;
-            r->zoom.delta = 0.9;
+            r->zoom.delta = 0.95;
             r->zoom.mx = event.button.x;
             r->zoom.my = event.button.y;
-            // SDL_GetMouseState (&r->zoom.mx, &r->zoom.my);
           }
         else if (event.button.button == SDL_BUTTON_RIGHT)
           {
             r->zooming = true;
-            r->zoom.delta = 1.1;
+            r->zoom.delta = 1.05;
             r->zoom.mx = event.button.x;
             r->zoom.my = event.button.y;
-            // SDL_GetMouseState (&r->zoom.mx, &r->zoom.my);
           }
         break;
       case SDL_MOUSEBUTTONUP:
@@ -177,7 +174,7 @@ mb_renderer_recompute (mb_renderer *r)
   const f64 dr = vp->rmax - vp->rmin;
   const f64 di = vp->imax - vp->imin;
 
-#pragma omp parallel for collapse(2) schedule(dynamic)
+#pragma omp parallel for schedule(dynamic)
   for (u32 y = 0; y < h; ++y)
     for (u32 x = 0; x < w; ++x)
       {
@@ -222,5 +219,4 @@ mb_renderer_recompute (mb_renderer *r)
 
   r->recompute = false;
 }
-
 

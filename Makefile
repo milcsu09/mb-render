@@ -4,7 +4,7 @@ CC := cc
 SRC := $(wildcard src/*.c)
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
 
-CCFLAGS := -std=c11 -O3 -Wall -Wextra -Wpedantic -fopenmp
+CCFLAGS := -std=c11 -O3 -march=native -Wall -Wextra -Wpedantic -fopenmp
 LDFLAGS := -lm -lSDL2 -fopenmp
 
 TARGET := main
