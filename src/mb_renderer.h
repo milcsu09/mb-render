@@ -4,6 +4,7 @@
 #include <SDL2/SDL.h>
 #include <stdbool.h>
 
+#include <pthread.h>
 #include "mb_viewport.h"
 
 typedef struct
