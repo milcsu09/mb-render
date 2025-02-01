@@ -49,6 +49,8 @@ void
 mb_renderer_main (mb_renderer *r)
 {
   u32 max_time = 0;
+  u32 all_time = 0;
+  u64 samples = 0;
   while (r->active)
     {
       mb_renderer_poll (r);
@@ -68,9 +70,11 @@ mb_renderer_main (mb_renderer *r)
           const u32 e = SDL_GetTicks ();
           const u32 t = e - s;
 
+          all_time += t;
           if (t > max_time)
             max_time = t;
 
+          samples++;
           printf ("(Recompute) %dms\n", t);
         }
 
@@ -89,6 +93,7 @@ mb_renderer_main (mb_renderer *r)
     }
 
   printf ("(Maximum) %dms\n", max_time);
+  printf ("(Avarage) %.1fms\n", all_time / (float)samples);
 }
 
 static void
@@ -166,6 +171,152 @@ mb_renderer_poll (mb_renderer *r)
       }
 }
 
+inline void
+mandelbrot_SIMD (f64 const _x0[4], f64 const _y0[4], i32 _xs[4], i32 max)
+{
+  __m256d x0 = _mm256_loadu_pd (_x0);
+  __m256d y0 = _mm256_loadu_pd (_y0);
+
+  __m256d x1 = _mm256_setzero_pd ();
+  __m256d y1 = _mm256_setzero_pd ();
+
+  __m256d one = _mm256_set1_pd (1.0);
+  __m256d four = _mm256_set1_pd (4.0);
+
+  __m256d xs = _mm256_setzero_pd ();
+
+  for (i32 i = 0; i < max; ++i)
+    {
+      __m256d x2 = _mm256_mul_pd (x1, x1);
+      __m256d y2 = _mm256_mul_pd (y1, y1);
+
+      __m256d s = _mm256_add_pd (x2, y2);
+
+      __m256d mask = _mm256_cmp_pd (s, four, _CMP_LT_OQ);
+      if (_mm256_movemask_pd (mask) == 0)
+        break;
+
+      __m256d d = _mm256_mul_pd (x1, y1);
+      x1 = _mm256_add_pd (_mm256_sub_pd (x2, y2), x0);
+      y1 = _mm256_add_pd (_mm256_add_pd (d, d), y0);
+
+      xs = _mm256_add_pd (xs, _mm256_and_pd (mask, one));
+    }
+
+  __m128i ixs = _mm256_cvttpd_epi32 (xs);
+  _mm_storeu_si128 ((__m128i *)_xs, ixs);
+}
+
+inline bool
+mb_renderer_solid_guess (i32 const xs[4])
+{
+  const i32 a = xs[0];
+  const i32 b = xs[1];
+  const i32 c = xs[2];
+  const i32 d = xs[3];
+  return (a == b && b == c && c == d);
+}
+
+inline void
+mb_renderer_recompute (mb_renderer *r)
+{
+  u32 *pixels;
+  int pitch;
+
+  SDL_LockTexture (r->texture, NULL, (void **)&pixels, &pitch);
+
+  SDL_PixelFormat *fmt = SDL_AllocFormat (SDL_PIXELFORMAT_RGB888);
+
+  const mb_viewport *vp = r->vp;
+
+  const i32 w = vp->w;
+  const i32 h = vp->h;
+
+  const f64 rmax = vp->rmax;
+  const f64 rmin = vp->rmin;
+  const f64 imax = vp->imax;
+  const f64 imin = vp->imin;
+
+  const f64 step_x = (rmax - rmin) / w;
+  const f64 step_y = (imax - imin) / h;
+
+// #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(dynamic, 1)
+  for (i32 y = 0; y < h; y += 4)
+    {
+      // const f64 im = imin + y * step_y;
+      for (i32 x = 0; x < w; x += 4)
+        {
+          i32 xs[4];
+
+          const f64 x0[4] = {
+            rmin + (x + 0) * step_x,
+            rmin + (x + 3) * step_x,
+            rmin + (x + 0) * step_x,
+            rmin + (x + 3) * step_x,
+          };
+
+          const f64 y0[4] = {
+            imin + (y + 0) * step_y,
+            imin + (y + 0) * step_y,
+            imin + (y + 3) * step_y,
+            imin + (y + 3) * step_y,
+          };
+
+          mandelbrot_SIMD (x0, y0, xs, r->max_iter);
+
+          if (mb_renderer_solid_guess (xs))
+            {
+              const i32 color = (xs[0] == r->max_iter) ? 0 : xs[0];
+              for (i32 i = 0; i < 4; ++i)
+                for (i32 j = 0; j < 4; ++j)
+                  {
+                    const u64 idx = (x + j) + (y + i) * (pitch / 4);
+                    const u8 r = (u8)(color * 2) % 256;
+                    const u8 g = (u8)(color * 2) % 256;
+                    const u8 b = (u8)(color * 4) % 256;
+                    pixels[idx] = SDL_MapRGB (fmt, r, g, b);
+                  }
+              continue;
+            }
+
+          for (i32 i = 0; i < 4; ++i)
+            {
+              const f64 x0[4] = {
+                rmin + (x + 0) * step_x,
+                rmin + (x + 1) * step_x,
+                rmin + (x + 2) * step_x,
+                rmin + (x + 3) * step_x,
+              };
+
+              const f64 im = imin + (y + i) * step_y;
+              const f64 y0[4] = { im, im, im, im };
+
+              i32 xs[4];
+              mandelbrot_SIMD (x0, y0, xs, r->max_iter);
+
+              for (i32 j = 0; j < 4; ++j)
+                {
+                  const i32 color = (xs[j] == r->max_iter) ? 0 : xs[j];
+                  const u64 idx = (x + j) + (y + i) * (pitch / 4);
+                  const u8 r = (u8)(color * 2) % 256;
+                  const u8 g = (u8)(color * 2) % 256;
+                  const u8 b = (u8)(color * 4) % 256;
+                  pixels[idx] = SDL_MapRGB (fmt, r, g, b);
+                }
+            }
+
+        }
+    }
+
+  SDL_FreeFormat (fmt);
+  SDL_UnlockTexture (r->texture);
+
+  r->recompute = false;
+}
+
+
+/*
 #if !MB_USE_SIMD
 static void
 mb_renderer_recompute (mb_renderer *r)
@@ -216,9 +367,9 @@ mb_renderer_recompute (mb_renderer *r)
           color = 0;
         else
           {
-            const u8 r = (i * 9) % 256;
-            const u8 g = (i * 8) % 256;
-            const u8 b = (i * 6) % 256;
+            const u8 r = (u8)(i * 2) % 256;
+            const u8 g = (u8)(i * 2) % 256;
+            const u8 b = (u8)(i * 4) % 256;
             color = SDL_MapRGB (fmt, r, g, b);
           }
 
@@ -308,9 +459,9 @@ mb_renderer_recompute (mb_renderer *r)
               color = 0;
             else
               {
-                const u8 r = (i * 9) % 256;
-                const u8 g = (i * 8) % 256;
-                const u8 b = (i * 6) % 256;
+                const u8 r = (u8)(i * 2) % 256;
+                const u8 g = (u8)(i * 2) % 256;
+                const u8 b = (u8)(i * 4) % 256;
                 color = SDL_MapRGB (fmt, r, g, b);
               }
             pixels[y * (pitch / 4) + (x + j)] = color;
@@ -323,4 +474,5 @@ mb_renderer_recompute (mb_renderer *r)
   r->recompute = false;
 }
 #endif // MB_USE_SIMD
+*/
 

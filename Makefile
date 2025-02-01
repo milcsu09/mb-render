@@ -5,7 +5,7 @@ SRC := $(wildcard src/*.c)
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
 
 CCFLAGS := -std=c11 -O3 -mavx2 -Wall -Wextra -Wpedantic -fopenmp
-LDFLAGS := -lm -lSDL2 -fopenmp
+LDFLAGS := -lm -lSDL2 -lmpfr -fopenmp
 
 TARGET := main
 

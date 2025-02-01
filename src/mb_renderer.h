@@ -17,6 +17,9 @@ typedef struct
   bool active;
   bool recompute;
 
+  SDL_Thread *recompute_thread;
+  SDL_mutex *mutex;
+
   bool dragging;
   struct
   {
