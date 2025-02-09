@@ -5,13 +5,13 @@ int
 main (void)
 {
   const int W = 1280;
-  const int H = 960;
+  const int H = 720;
 
   mb_viewport vp;
   mb_viewport_init (&vp, -.75, 0, W, H);
 
-  printf ("%f, %f\n", vp.rmin, vp.rmax);
-  printf ("%f, %f\n", vp.imin, vp.imax);
+  // printf ("%f, %f\n", vp.rmin, vp.rmax);
+  // printf ("%f, %f\n", vp.imin, vp.imax);
 
   mb_renderer r;
   mb_renderer_init (&r, &vp);

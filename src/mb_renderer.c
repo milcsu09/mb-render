@@ -2,10 +2,25 @@
 #include "mb_types.h"
 #include <omp.h>
 
-#define MB_USE_SIMD 1
+#define MB_ZOOM_DELTA .03
 
 static void mb_renderer_poll (mb_renderer *r);
 static void mb_renderer_recompute (mb_renderer *r);
+
+static inline void
+mb_util_format_number (f64 num, char *buffer, size_t buffer_size)
+{
+  static const char *const suffixes[] = { "", "K", "M", "B", "T" };
+  int suffix_index = 0;
+
+  while (num >= 1000.0 && suffix_index < 4)
+    {
+      num /= 1000.0;
+      suffix_index++;
+    }
+
+  snprintf (buffer, buffer_size, "%.1f%s", num, suffixes[suffix_index]);
+}
 
 void
 mb_renderer_init (mb_renderer *r, mb_viewport *vp)
@@ -51,9 +66,56 @@ mb_renderer_main (mb_renderer *r)
   u32 max_time = 0;
   u32 all_time = 0;
   u64 samples = 0;
+
+  i32 pmx, pmy;
+  SDL_GetMouseState (&pmx, &pmy);
+
   while (r->active)
     {
       mb_renderer_poll (r);
+
+      const u8 *keys = SDL_GetKeyboardState (NULL);
+
+      i32 mx, my;
+      SDL_GetMouseState (&mx, &my);
+
+      if (keys[SDL_SCANCODE_X])
+        {
+          u32 *pixels;
+          int pitch;
+
+          SDL_LockTexture (r->texture, NULL, (void **)&pixels, &pitch);
+
+          SDL_PixelFormat *fmt = SDL_AllocFormat (SDL_PIXELFORMAT_RGB888);
+
+          const i32 dx = pmx - mx;
+          const i32 dy = pmy - my;
+    
+          const i32 steps = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
+
+          const f64 xInc = dx / (float) steps;
+          const f64 yInc = dy / (float) steps;
+
+          f64 x = mx;
+          f64 y = my;
+
+          for (int i = 0; i <= steps; i++)
+            {
+              for (i32 j = -2; j < 2; ++j)
+                for (i32 i = -2; i < 2; ++i)
+                  {
+                    const u64 idx = ((int)x + i) + ((int)y + j) * (pitch / 4);
+                    pixels[idx] = SDL_MapRGB (fmt, 255, 0, 0);
+                  }
+              x += xInc;
+              y += yInc;
+            }
+
+          SDL_FreeFormat (fmt);
+          SDL_UnlockTexture (r->texture);
+        }
+
+      pmx = mx, pmy = my;
 
       if (r->zooming)
         {
@@ -75,7 +137,11 @@ mb_renderer_main (mb_renderer *r)
             max_time = t;
 
           samples++;
-          printf ("(Recompute) %dms\n", t);
+
+          char buffer[32];
+          const f64 dr = r->vp->rmax - r->vp->rmin;
+          mb_util_format_number (1.0 / dr, buffer, 32);
+          printf ("(Recompute) %dms 1/%s\n", t, buffer);
         }
 
       SDL_SetRenderDrawColor (r->renderer, 32, 24, 24, 255);
@@ -116,14 +182,14 @@ mb_renderer_poll (mb_renderer *r)
         else if (event.button.button == SDL_BUTTON_LEFT)
           {
             r->zooming = true;
-            r->zoom.delta = 0.95;
+            r->zoom.delta = 1.0 - MB_ZOOM_DELTA;
             r->zoom.mx = event.button.x;
             r->zoom.my = event.button.y;
           }
         else if (event.button.button == SDL_BUTTON_RIGHT)
           {
             r->zooming = true;
-            r->zoom.delta = 1.05;
+            r->zoom.delta = 1.0 + MB_ZOOM_DELTA;
             r->zoom.mx = event.button.x;
             r->zoom.my = event.button.y;
           }
@@ -159,11 +225,30 @@ mb_renderer_poll (mb_renderer *r)
           }
         break;
       case SDL_MOUSEMOTION:
-
         if (r->dragging)
           {
             r->drag.dx = event.motion.x - r->drag.sx;
             r->drag.dy = event.motion.y - r->drag.sy;
+          }
+        break;
+      case SDL_KEYDOWN:
+        switch (event.key.keysym.sym)
+          {
+          case SDLK_F2:
+            mb_viewport_init (r->vp, -.75, 0, r->vp->w, r->vp->h);
+            r->recompute = true;
+            break;
+          case SDLK_F3:
+            {
+              const f64 dr = (r->vp->rmin + r->vp->rmax) / 2;
+              const f64 di = (r->vp->imin + r->vp->imax) / 2;
+              printf ("%.17lf, %.17lf\n", dr, di);
+            }
+            break;
+          case SDLK_F5:
+            r->recompute = true;
+          default:
+            break;
           }
         break;
       default:
@@ -218,6 +303,15 @@ mb_renderer_solid_guess (i32 const xs[4])
 }
 
 inline void
+mb_renderer_rcompute_color (mb_renderer *r, i32 i, u8 *cr, u8 *cg, u8 *cb)
+{
+  (void) r;
+  *cr = i * 8;
+  *cg = i * 8;
+  *cb = i * 8;
+}
+
+inline void
 mb_renderer_recompute (mb_renderer *r)
 {
   u32 *pixels;
@@ -240,11 +334,9 @@ mb_renderer_recompute (mb_renderer *r)
   const f64 step_x = (rmax - rmin) / w;
   const f64 step_y = (imax - imin) / h;
 
-// #pragma omp parallel for schedule(static)
 #pragma omp parallel for schedule(dynamic, 1)
   for (i32 y = 0; y < h; y += 4)
     {
-      // const f64 im = imin + y * step_y;
       for (i32 x = 0; x < w; x += 4)
         {
           i32 xs[4];
@@ -268,14 +360,14 @@ mb_renderer_recompute (mb_renderer *r)
           if (mb_renderer_solid_guess (xs))
             {
               const i32 color = (xs[0] == r->max_iter) ? 0 : xs[0];
+
               for (i32 i = 0; i < 4; ++i)
                 for (i32 j = 0; j < 4; ++j)
                   {
                     const u64 idx = (x + j) + (y + i) * (pitch / 4);
-                    const u8 r = (u8)(color * 2) % 256;
-                    const u8 g = (u8)(color * 2) % 256;
-                    const u8 b = (u8)(color * 4) % 256;
-                    pixels[idx] = SDL_MapRGB (fmt, r, g, b);
+                    u8 cr, cg, cb;
+                    mb_renderer_rcompute_color (r, color, &cr, &cg, &cb);
+                    pixels[idx] = SDL_MapRGB (fmt, cr, cg, cb);
                   }
               continue;
             }
@@ -299,10 +391,9 @@ mb_renderer_recompute (mb_renderer *r)
                 {
                   const i32 color = (xs[j] == r->max_iter) ? 0 : xs[j];
                   const u64 idx = (x + j) + (y + i) * (pitch / 4);
-                  const u8 r = (u8)(color * 2) % 256;
-                  const u8 g = (u8)(color * 2) % 256;
-                  const u8 b = (u8)(color * 4) % 256;
-                  pixels[idx] = SDL_MapRGB (fmt, r, g, b);
+                  u8 cr, cg, cb;
+                  mb_renderer_rcompute_color (r, color, &cr, &cg, &cb);
+                  pixels[idx] = SDL_MapRGB (fmt, cr, cg, cb);
                 }
             }
 
@@ -314,165 +405,4 @@ mb_renderer_recompute (mb_renderer *r)
 
   r->recompute = false;
 }
-
-
-/*
-#if !MB_USE_SIMD
-static void
-mb_renderer_recompute (mb_renderer *r)
-{
-  u32 *pixels;
-  int pitch;
-
-  SDL_LockTexture (r->texture, NULL, (void **)&pixels, &pitch);
-
-  SDL_PixelFormat *fmt = SDL_AllocFormat (SDL_PIXELFORMAT_RGB888);
-
-  const mb_viewport *vp = r->vp;
-
-  const u32 w = vp->w;
-  const u32 h = vp->h;
-
-  const f64 dr = vp->rmax - vp->rmin;
-  const f64 di = vp->imax - vp->imin;
-
-#pragma omp parallel for schedule(dynamic)
-  for (u32 y = 0; y < h; ++y)
-    for (u32 x = 0; x < w; ++x)
-      {
-        const f64 cr = vp->rmin + (x / (f64)w) * dr;
-        const f64 ci = vp->imin + (y / (f64)h) * di;
-
-        i32 i;
-        f64 zr = cr;
-        f64 zi = ci;
-
-        for (i = 0; i < r->max_iter; ++i)
-          {
-            const f64 zr_sq = zr * zr;
-            const f64 zi_sq = zi * zi;
-
-            if (zr_sq + zi_sq > 4.0)
-              break;
-
-            const f64 t = zr_sq - zi_sq + cr;
-
-            zi = 2.0 * zr * zi + ci;
-            zr = t;
-          }
-
-        u32 color;
-
-        if (i == r->max_iter)
-          color = 0;
-        else
-          {
-            const u8 r = (u8)(i * 2) % 256;
-            const u8 g = (u8)(i * 2) % 256;
-            const u8 b = (u8)(i * 4) % 256;
-            color = SDL_MapRGB (fmt, r, g, b);
-          }
-
-        pixels[y * (pitch / 4) + x] = color;
-      }
-
-  SDL_FreeFormat (fmt);
-  SDL_UnlockTexture (r->texture);
-
-  r->recompute = false;
-}
-
-#else
-
-void
-mb_renderer_recompute_iteration (f64 *real, f64 *imag, u32 *results, u32 nmax)
-{
-  __m256d zr = _mm256_setzero_pd ();
-  __m256d zi = _mm256_setzero_pd ();
-  __m256d cr = _mm256_loadu_pd (real);
-  __m256d ci = _mm256_loadu_pd (imag);
-  __m256d iter = _mm256_setzero_pd ();
-  __m256d four = _mm256_set1_pd (4.0);
-  __m256d one = _mm256_set1_pd (1.0);
-
-  for (int i = 0; i < nmax; ++i)
-    {
-      __m256d zr2 = _mm256_mul_pd (zr, zr);
-      __m256d zi2 = _mm256_mul_pd (zi, zi);
-      __m256d mag2 = _mm256_add_pd (zr2, zi2);
-
-      __m256d mask = _mm256_cmp_pd (mag2, four, _CMP_LT_OQ);
-      if (_mm256_movemask_pd (mask) == 0)
-        break;
-
-      __m256d zrzi = _mm256_mul_pd (zr, zi);
-      zr = _mm256_add_pd (_mm256_sub_pd (zr2, zi2), cr);
-      zi = _mm256_add_pd (_mm256_add_pd (zrzi, zrzi), ci);
-
-      iter = _mm256_add_pd (iter, _mm256_and_pd (mask, one));
-    }
-
-  __m128i int_iter = _mm256_cvttpd_epi32 (iter);
-  _mm_storeu_si128 ((__m128i *)results, int_iter);
-}
-
-static void
-mb_renderer_recompute (mb_renderer *r)
-{
-  u32 *pixels;
-  int pitch;
-
-  SDL_LockTexture (r->texture, NULL, (void **)&pixels, &pitch);
-
-  SDL_PixelFormat *fmt = SDL_AllocFormat (SDL_PIXELFORMAT_RGB888);
-
-  const mb_viewport *vp = r->vp;
-
-  const u32 w = vp->w;
-  const u32 h = vp->h;
-
-  const f64 dr = vp->rmax - vp->rmin;
-  const f64 di = vp->imax - vp->imin;
-
-#pragma omp parallel for schedule(dynamic)
-  for (u32 y = 0; y < h; ++y)
-    for (u32 x = 0; x < w; x += 4)
-      {
-        f64 real[4], imag[4];
-        for (u32 i = 0; i < 4; ++i)
-          {
-            const f64 cr = vp->rmin + ((x + i) / (f64)w) * dr;
-            const f64 ci = vp->imin + (y / (f64)h) * di;
-            real[i] = cr;
-            imag[i] = ci;
-          }
-
-        u32 results[4];
-        mb_renderer_recompute_iteration (real, imag, results, r->max_iter);
-
-        for (int j = 0; j < 4; ++j)
-          {
-            int i = results[j];
-
-            u32 color;
-            if (i == r->max_iter)
-              color = 0;
-            else
-              {
-                const u8 r = (u8)(i * 2) % 256;
-                const u8 g = (u8)(i * 2) % 256;
-                const u8 b = (u8)(i * 4) % 256;
-                color = SDL_MapRGB (fmt, r, g, b);
-              }
-            pixels[y * (pitch / 4) + (x + j)] = color;
-          }
-      }
-
-  SDL_FreeFormat (fmt);
-  SDL_UnlockTexture (r->texture);
-
-  r->recompute = false;
-}
-#endif // MB_USE_SIMD
-*/
 
