@@ -4,8 +4,10 @@
 int
 main (void)
 {
-  const int W = 1280;
-  const int H = 720;
+  srand(time(NULL));
+
+  const int W = 1920;
+  const int H = 1080;
 
   mb_viewport vp;
   mb_viewport_init (&vp, -.75, 0, W, H);
